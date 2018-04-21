@@ -1,0 +1,149 @@
+package com.example.blockgraph;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.List;
+import java.util.ArrayList;
+
+import org.apache.commons.configuration2.Configuration;
+import org.apache.commons.configuration2.FileBasedConfiguration;
+import org.apache.commons.configuration2.PropertiesConfiguration;
+import org.apache.commons.configuration2.builder.FileBasedConfigurationBuilder;
+import org.apache.commons.configuration2.builder.fluent.Parameters;
+import org.apache.commons.configuration2.ex.ConfigurationException;
+import org.apache.commons.io.IOUtils;
+import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
+
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.services.s3.model.CannedAccessControlList;
+import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.amazonaws.services.s3.model.PutObjectRequest;
+import com.amazonaws.services.s3.model.PutObjectResult;
+import com.esotericsoftware.kryo.Kryo;
+
+// multipar upload to s3
+import com.amazonaws.services.s3.model.AbortMultipartUploadRequest;
+import com.amazonaws.services.s3.model.CompleteMultipartUploadRequest;
+import com.amazonaws.services.s3.model.InitiateMultipartUploadRequest;
+import com.amazonaws.services.s3.model.InitiateMultipartUploadResult;
+import com.amazonaws.services.s3.model.PartETag;
+import com.amazonaws.services.s3.model.UploadPartRequest;
+
+import info.blockchain.api.APIException;
+import info.blockchain.api.blockexplorer.Address;
+import info.blockchain.api.blockexplorer.Block;
+import info.blockchain.api.blockexplorer.BlockExplorer;
+import info.blockchain.api.blockexplorer.Input;
+import info.blockchain.api.blockexplorer.Output;
+import info.blockchain.api.blockexplorer.SimpleBlock;
+import info.blockchain.api.blockexplorer.Transaction;
+
+public class BlockFetcher
+{
+    private final static long LATEST_BLOCK_HEIGHT = 519152;
+
+    public static void main(String[] args) throws APIException, IOException, InterruptedException, ConfigurationException
+    {
+
+	Parameters params = new Parameters();
+	// Read data from this file
+	File propertiesFile = new File(args[0]);
+
+	FileBasedConfigurationBuilder<FileBasedConfiguration> builder = new FileBasedConfigurationBuilder<FileBasedConfiguration>(PropertiesConfiguration.class)
+		.configure(params.fileBased().setFile(propertiesFile));
+	Configuration config = builder.getConfiguration();
+
+	String awsAccountKey = (String) config.getProperty("aws.account.key");
+	String awsAccountSecret = (String) config.getProperty("aws.account.secret");
+	String bucketName = (String) config.getProperty("aws.s3.bucket");
+
+	AmazonS3Client s3Client = new AmazonS3Client(new BasicAWSCredentials(awsAccountKey, awsAccountSecret));
+
+        // Create a list of UploadPartResponse objects. You get one of these
+        // for each part upload.
+        List<PartETag> partETags = new ArrayList<PartETag>();
+
+        // Step 1: Initialize.
+        InitiateMultipartUploadRequest initRequest = new 
+             InitiateMultipartUploadRequest(bucketName, awsAccountKey);
+        InitiateMultipartUploadResult initResponse = 
+        	                   s3Client.initiateMultipartUpload(initRequest);
+
+
+	Kryo kryo = new Kryo();
+	BlockExplorer blockExplorer = new BlockExplorer();
+
+	long blockHeight = Long.parseLong(args[1]);
+
+	List<Block> blocks = blockExplorer.getBlocksAtHeight(blockHeight);
+
+	ByteArrayOutputStream byteOut = new ByteArrayOutputStream();
+
+	try (com.esotericsoftware.kryo.io.Output kryoOutput = new com.esotericsoftware.kryo.io.Output(byteOut))
+	{
+	    BlockHeight blockHeightObj = new BlockHeight();
+	    blockHeightObj.setBlocks(blocks);
+	    kryo.writeObject(kryoOutput, blockHeightObj);
+
+	}
+
+
+
+        try (ByteArrayInputStream byteIn = new ByteArrayInputStream(byteOut.toByteArray())){
+
+	    long contentLength = byteIn.count;
+	    long partSize = 5242880;
+            // Step 2: Upload parts.
+            long filePosition = 0;
+            for (int i = 1; filePosition < contentLength; i++) {
+                // Last part can be less than 5 MB. Adjust part size.
+            	partSize = Math.min(partSize, (contentLength - filePosition));
+            	
+                // Create request to upload a part.
+                UploadPartRequest uploadRequest = new UploadPartRequest()
+                    .withBucketName(bucketName).withKey(awsAccountKey)
+                    .withUploadId(initResponse.getUploadId()).withPartNumber(i)
+                    .withFileOffset(filePosition)
+                    .withFile(file)
+                    .withPartSize(partSize);
+
+                // Upload part and add response to our list.
+                partETags.add(
+                		s3Client.uploadPart(uploadRequest).getPartETag());
+
+                filePosition += partSize;
+            }
+
+            // Step 3: Complete.
+            CompleteMultipartUploadRequest compRequest = new 
+                         CompleteMultipartUploadRequest(
+                                    bucketName, 
+                                    awsAccountKey, 
+                                    initResponse.getUploadId(), 
+                                    partETags);
+
+            s3Client.completeMultipartUpload(compRequest);
+        } catch (Exception e) {
+            s3Client.abortMultipartUpload(new AbortMultipartUploadRequest(
+                    bucketName, awsAccountKey, initResponse.getUploadId()));
+        }
+
+/*
+	try (ByteArrayInputStream byteIn = new ByteArrayInputStream(byteOut.toByteArray()))
+	{
+	    PutObjectRequest putObjectRequest = new PutObjectRequest(bucketName, "height-" + blockHeight, byteIn, new ObjectMetadata());
+
+	    P/utObjectResult putObjectResult = s3Client.putObject(putObjectRequest);
+
+	}
+*/
+
+
+
+    }
+}
